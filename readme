@@ -1,0 +1,260 @@
+Com certeza! Baseado em todo o nosso processo de troubleshooting, aqui está o guia completo e definitivo, formatado para ser copiado diretamente para o `README.md` do seu GitHub.
+
+Este roteiro inclui apenas os passos que funcionaram, na ordem correta, e incorpora todas as lições que aprendemos (restauração manual, cópia do `settings.php` e da pasta `files`, permissões, etc.).
+
+---
+
+# Guia Definitivo: Migrando um Site Drupal para uma Nova VPS
+
+Este guia detalha o processo completo para clonar um site Drupal de uma VPS para outra, utilizando um backup gerado pelo Drush e realizando a restauração de forma manual para garantir a compatibilidade e o funcionamento correto.
+
+## Fase 1: Backup na VPS Antiga
+
+Execute estes passos na sua **VPS antiga** para criar e preparar os arquivos para a migração.
+
+### 1. Crie o Backup Completo com Drush
+
+Acesse a pasta raiz do projeto Drupal e gere o arquivo de backup.
+
+```bash
+# Acesse a pasta do projeto
+cd /var/www/drupal
+
+# Crie o backup (excluindo settings.php e evitando erros de permissão do MySQL)
+./vendor/bin/drush ard --destination=/tmp/drupal-backup.tar.gz --exclude-code-paths=web/sites/default/settings.php --extra-dump=--no-tablespaces
+```
+
+### 2. Prepare os Arquivos `settings.php` e `files`
+
+Copie o `settings.php` e compacte a pasta `files` para facilitar a transferência.
+
+```bash
+# Copie o settings.php para a pasta /tmp
+cp /var/www/drupal/web/sites/default/settings.php /tmp/settings_backup.php
+
+# Acesse a pasta default e compacte o diretório 'files'
+cd /var/www/drupal/web/sites/default
+tar -czvf /tmp/files.tar.gz files/
+```
+
+### 3. Transfira os Arquivos para a Nova VPS
+
+Use `scp` ou um cliente SFTP como o WinSCP para transferir os três arquivos a seguir da VPS antiga para a pasta `/tmp` da **nova VPS**:
+
+*   `/tmp/drupal-backup.tar.gz`
+*   `/tmp/settings_backup.php`
+*   `/tmp/files.tar.gz`
+
+---
+
+## Fase 2: Preparação da Nova VPS (Ubuntu 22.04)
+
+Execute todos os comandos a seguir na **nova VPS**, logado como `root`.
+
+### 1. Atualize o Sistema e Configure o Firewall
+
+```bash
+# Atualize os pacotes
+apt update && apt upgrade -y
+
+# Instale o Apache primeiro para que o perfil do firewall seja criado
+apt install apache2 -y
+
+# Configure o firewall para permitir SSH, HTTP e HTTPS
+ufw allow OpenSSH
+ufw allow 'Apache Full'
+ufw enable
+```> Responda `y` (sim) para a confirmação.
+
+### 2. Instale PHP 8.3, MySQL e Módulos Essenciais
+
+```bash
+# Adicione o repositório PPA para o PHP 8.3
+add-apt-repository ppa:ondrej/php -y
+apt update
+
+# Instale a stack completa
+apt install mysql-server php8.3 libapache2-mod-php8.3 php8.3-mysql php8.3-gd php8.3-xml php8.3-curl php8.3-mbstring php8.3-zip php8.3-intl php8.3-bcmath -y
+```
+
+### 3. Proteja a Instalação do MySQL
+
+```bash
+mysql_secure_installation
+```
+> Siga as instruções. Recomenda-se responder `N` (não) para o componente de validação de senha e `Y` (sim) para as demais perguntas de segurança.
+
+### 4. Instale o Composer e o Drush
+
+```bash
+# Instale o Composer
+curl -sS https://getcomposer.org/installer -o /tmp/composer-setup.php
+php8.3 /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer
+
+# Instale o Drush globalmente
+composer global require drush/drush
+echo 'export PATH="/root/.config/composer/vendor/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+---
+
+## Fase 3: Criação do Banco de Dados
+
+Crie o banco de dados e o usuário com as mesmas credenciais do seu site original para facilitar a restauração.
+
+```bash
+# Acesse o MySQL
+mysql -u root -p
+```
+
+Execute os seguintes comandos no prompt do MySQL:
+
+```sql
+CREATE DATABASE drupal CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE USER 'drupal_user'@'localhost' IDENTIFIED BY 'oWa9d5LE}5/)';
+GRANT ALL PRIVILEGES ON drupal.* TO 'drupal_user'@'localhost';
+FLUSH PRIVILEGES;
+EXIT;
+```
+
+---
+
+## Fase 4: Restauração Manual do Site
+
+Agora, vamos restaurar os arquivos e o banco de dados do seu backup.
+
+### 1. Crie a Pasta do Site e Descompacte o Backup
+
+```bash
+# Crie e acesse o diretório do site
+mkdir -p /var/www/drupal
+cd /var/www/drupal
+
+# Descompacte o backup principal
+tar -xzvf /tmp/drupal-backup.tar.gz --strip-components=1
+```
+
+### 2. Importe o Banco de Dados
+
+O arquivo `database.sql` foi extraído na pasta atual.
+
+```bash
+mysql -u drupal_user -p drupal < database.sql
+```
+> Digite a senha `oWa9d5LE}5/)` quando solicitado.
+
+### 3. Restaure o `settings.php` e a Pasta `files`
+
+```bash
+# Copie o arquivo settings.php original para o lugar certo
+cp /tmp/settings_backup.php /var/www/drupal/web/sites/default/settings.php
+
+# Acesse a pasta default e descompacte a pasta 'files'
+cd /var/www/drupal/web/sites/default
+tar -xzvf /tmp/files.tar.gz
+```
+
+### 4. Instale as Dependências do Composer
+
+Isso criará a pasta `vendor` e evitará o Erro 500.
+
+```bash
+# Volte para a raiz do projeto
+cd /var/www/drupal
+
+# Instale as dependências
+composer install
+```
+
+---
+
+## Fase 5: Configuração do Servidor Web (Apache)
+
+### 1. Crie o Arquivo de Configuração do Site
+
+```bash
+nano /etc/apache2/sites-available/drupal.conf
+```
+
+Cole o seguinte conteúdo. **Aviso:** O `DocumentRoot` deve apontar para a subpasta `web`.
+
+```apache
+<VirtualHost *:80>
+    ServerAdmin webmaster@localhost
+    DocumentRoot /var/www/drupal/web
+
+    <Directory /var/www/drupal/web>
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    ErrorLog ${APACHE_LOG_DIR}/drupal_error.log
+    CustomLog ${APACHE_LOG_DIR}/drupal_access.log combined
+</VirtualHost>
+```
+
+### 2. Ative o Site e Reinicie o Apache
+
+```bash
+a2dissite 000-default.conf
+a2ensite drupal.conf
+a2enmod rewrite
+systemctl restart apache2
+```
+
+### 3. Ajuste as Permissões dos Arquivos (Passo Crítico)
+
+```bash
+chown -R www-data:www-data /var/www/drupal
+find /var/www/drupal -type d -exec chmod 755 {} \;
+find /var/www/drupal -type f -exec chmod 644 {} \;
+```
+
+---
+
+## Fase 6: Teste via IP e Finalização
+
+### 1. Permita o Acesso via IP (Temporário)
+
+Edite o `settings.php` para adicionar o IP da sua nova VPS à lista de domínios confiáveis.
+
+```bash
+nano /var/www/drupal/web/sites/default/settings.php
+```
+
+Encontre a seção `$settings['trusted_host_patterns']` e adicione o IP:
+
+```php
+$settings['trusted_host_patterns'] = [
+  '^www\.codeinova\.com$',
+  '^codeinova\.com$',
+  '^72\.60\.156\.162$', // Adicione esta linha com o IP da sua nova VPS
+];
+```
+
+### 2. Limpe o Cache do Drupal
+
+```bash
+# Volte para a raiz do projeto
+cd /var/www/drupal
+
+# Dê permissão de execução ao Drush local e limpe o cache
+chmod +x ./vendor/bin/drush
+./vendor/bin/drush cr
+```
+
+Acesse `http://72.60.156.162` no seu navegador. O site deve funcionar perfeitamente.
+
+### 3. Aponte o Domínio e Ative o SSL
+
+1.  **Mude o DNS:** No painel de controle do seu domínio, altere o registro "A" de `codeinova.com` e `www` para o novo IP: `72.60.156.162`.
+2.  **Instale o Certificado SSL:** Após a propagação do DNS, execute na VPS:
+
+    ```bash
+    apt install certbot python3-certbot-apache -y
+    certbot --apache
+    ```
+    > Siga as instruções: digite seu e-mail, aceite os termos, informe `codeinova.com www.codeinova.com`, escolha o arquivo `drupal-le-ssl.conf` para o `www` e opte por redirecionar todo o tráfego para HTTPS.
+
+**Parabéns, sua migração está completa!**
